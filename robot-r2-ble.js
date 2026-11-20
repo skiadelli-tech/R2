@@ -1,4 +1,4 @@
-/* Robot R2 TurboWarp/Scratch Extension — v15 (stable sensor monitors + line detect + disconnect + pin labels)
+/* Robot R2 TurboWarp/Scratch Extension — v18 (ξεχωριστά μπλοκ «στρίψε», ένδειξη ρομπότ στην παλέτα)
 
    Problem solved:
    - Scratch monitors evaluate reporter/boolean blocks many times per second.
@@ -25,6 +25,7 @@
        LDR:        H  -> "L:<lux>\n"
        Sound:      J  -> "S:<level>\n"
        Line:       M  -> "N:<0/1>\n" (any line sensor detects line)
+     Identity:     I  -> "I:<id>\n" (last digits of the Bluetooth address)
 */
 
 (function (Scratch) {
@@ -51,6 +52,7 @@
       this.lastLux = -1;
       this.lastSound = -1;
       this.lastLineDetected = 0; // 0/1
+      this.robotId = "";         // π.χ. "DE" (το στέλνει το ρομπότ)
 
       // BLE write queue (prevents GATT overlap)
       this._writeChain = Promise.resolve();
@@ -78,6 +80,25 @@
       // Bindings
       this._onNotify = this._onNotify.bind(this);
       this._onDisconnected = this._onDisconnected.bind(this);
+
+      // Το κόκκινο κουμπί "stop" του Scratch σταματά και το ρομπότ.
+      // (Πριν, το ρομπότ συνέχιζε να κινείται γιατί ο "χτύπος" κίνησης δεν σταματούσε.)
+      this._moveToken = 0;
+      try {
+        const rt = Scratch.vm && Scratch.vm.runtime;
+        if (rt && rt.on) rt.on("PROJECT_STOP_ALL", () => this._emergencyStop());
+      } catch (_) {}
+    }
+
+    _emergencyStop() {
+      this._moveToken++;            // ακυρώνει τυχόν "κινήσου για ... δευτ." σε εξέλιξη
+      this._stopHeartbeat();
+      if (!this._requireConnected()) return;
+      if (this._lineFollow) {
+        this._lineFollow = false;
+        this._write("z");
+      }
+      this._write("S");
     }
 
     getInfo() {
@@ -90,10 +111,12 @@
         color3: "#005B5F",
 
         blocks: [
-         // { blockType: Scratch.BlockType.LABEL, text: "Robot R2 (BLE)" },
+          // Ένδειξη στην κορυφή της παλέτας: ποιο ρομπότ είναι συνδεδεμένο
+          { blockType: Scratch.BlockType.LABEL, text: this._statusLabel() },
           { blockType: Scratch.BlockType.BUTTON, text: "Σύνδεση", func: "connect" },
           { blockType: Scratch.BlockType.BUTTON, text: "Αποσύνδεση", func: "disconnect" },
           { opcode: "isConnected", blockType: Scratch.BlockType.BOOLEAN, text: "συνδεδεμένο;" },
+          { opcode: "robotIdText", blockType: Scratch.BlockType.REPORTER, text: "αναγνωριστικό ρομπότ" },
 
           "---",
 
@@ -112,6 +135,23 @@
             text: "κινήσου [DIR] για [SECS] δευτ.",
             arguments: {
               DIR:  { type: Scratch.ArgumentType.STRING, menu: "dirMenu", defaultValue: "U" },
+              SECS: { type: Scratch.ArgumentType.NUMBER, defaultValue: 1 }
+            }
+          },
+          {
+            opcode: "turn",
+            blockType: Scratch.BlockType.COMMAND,
+            text: "στρίψε [DIR]",
+            arguments: {
+              DIR: { type: Scratch.ArgumentType.STRING, menu: "turnMenu", defaultValue: "L" }
+            }
+          },
+          {
+            opcode: "turnFor",
+            blockType: Scratch.BlockType.COMMAND,
+            text: "στρίψε [DIR] για [SECS] δευτ.",
+            arguments: {
+              DIR:  { type: Scratch.ArgumentType.STRING, menu: "turnMenu", defaultValue: "L" },
               SECS: { type: Scratch.ArgumentType.NUMBER, defaultValue: 1 }
             }
           },
@@ -166,11 +206,14 @@
             acceptReporters: true,
             items: [
               { text: "μπροστά", value: "U" },
-              { text: "πίσω", value: "D" },
+              { text: "πίσω", value: "D" }
+            ]
+          },
+          turnMenu: {
+            acceptReporters: true,
+            items: [
               { text: "αριστερά", value: "L" },
-              { text: "δεξιά", value: "R" },
-              { text: "μπροστά-αριστερά", value: "Q" },
-              { text: "μπροστά-δεξιά", value: "E" }
+              { text: "δεξιά", value: "R" }
             ]
           },
           onOffMenu: {
@@ -194,6 +237,20 @@
           }
         }
       };
+    }
+
+    _statusLabel() {
+      if (!this._requireConnected()) return "🤖 Ρομπότ: μη συνδεδεμένο";
+      const id = this.robotId || (this.device && this.device.name) || "";
+      return id ? "🤖 Ρομπότ: " + id : "🤖 Ρομπότ: συνδεδεμένο";
+    }
+
+    // Ξανασχεδιάζει την παλέτα ώστε να φανεί η νέα ένδειξη
+    _refreshPalette() {
+      try {
+        const em = Scratch.vm && Scratch.vm.extensionManager;
+        if (em && em.refreshBlocks) em.refreshBlocks();
+      } catch (_) {}
     }
 
     _requireConnected() {
@@ -240,6 +297,12 @@
           } else if (line.startsWith("N:")) {
             const v = parseInt(line.slice(2), 10);
             this.lastLineDetected = (v === 1) ? 1 : 0;
+          } else if (line.startsWith("I:")) {
+            const id = line.slice(2).trim();
+            if (id && id !== this.robotId) {
+              this.robotId = id;
+              this._refreshPalette();
+            }
           }
         }
       } catch (_) {}
@@ -259,9 +322,13 @@
       this.lastTouch = 0;
       this.lastLux = -1;
       this.lastSound = -1;
+      this.lastLineDetected = 0;
+      this.robotId = "";
+      this._moveToken++;
 
       this._stopHeartbeat();
       this._stopPoll();
+      this._refreshPalette();
     }
 
     _startHeartbeat() {
@@ -365,6 +432,16 @@
       await this._write("S");
 
       this._startPoll();
+
+      this._refreshPalette();
+
+      // Ζητάμε την ταυτότητα του ρομπότ, ξανά και ξανά μέχρι να απαντήσει (έως 8 φορές)
+      const askId = (triesLeft) => {
+        if (!this._requireConnected() || this.device !== device || this.robotId || triesLeft <= 0) return;
+        this._write("I");
+        setTimeout(() => askId(triesLeft - 1), 700);
+      };
+      setTimeout(() => askId(8), 300);
     }
 
     async disconnect() {
@@ -390,21 +467,38 @@
       return this._requireConnected();
     }
 
+    robotIdText() {
+      if (!this._requireConnected()) return "";
+      return this.robotId || (this.device && this.device.name) || "";
+    }
+
     // ----- MOVEMENT -----
-    async move(args) {
+    // Δέχεται κωδικό (U D L R Q E) ή και ελληνική λέξη από μεταβλητή.
+    _dirCode(value, fallback) {
+      const v = String(value == null ? "" : value).trim();
+      const up = v.toUpperCase();
+      if (up.length === 1 && "UDLRQE".includes(up)) return up;
+      const words = {
+        "μπροστά": "U", "πίσω": "D", "αριστερά": "L", "δεξιά": "R",
+        "μπροστά-αριστερά": "E", "μπροστά-δεξιά": "Q"
+      };
+      return words[v.toLowerCase()] || fallback;
+    }
+
+    async _drive(cmd) {
       if (!this._requireConnected()) return;
       if (this._lineFollow) {
         this._lineFollow = false;
         await this._write("z");
         await this._write("S");
       }
-      const cmd = String(args.DIR || "U").trim().toUpperCase();
+      this._moveToken++;
       this._driveCmd = cmd;
       this._startHeartbeat();
       await this._write(cmd);
     }
 
-    async moveFor(args) {
+    async _driveFor(cmd, secsArg) {
       if (!this._requireConnected()) return;
       if (this._lineFollow) {
         this._lineFollow = false;
@@ -412,21 +506,30 @@
         await this._write("S");
       }
 
-      const cmd = String(args.DIR || "U").trim().toUpperCase();
-      let secs = Number(args.SECS);
+      let secs = Number(secsArg);
       if (!isFinite(secs) || secs <= 0) secs = 0.1;
 
-      const wasMoving = (this._driveCmd && this._driveCmd !== "S" && !!this._driveTimer);
-      if (wasMoving) this._stopHeartbeat();
-
+      // Ο "χτύπος" κίνησης μένει ενεργός σε όλη τη διάρκεια, ώστε το ρομπότ να
+      // μη σταματά από το failsafe (0,9 δευτ.) του firmware.
+      const token = ++this._moveToken;
       this._driveCmd = cmd;
+      this._startHeartbeat();
       await this._write(cmd);
       await new Promise(r => setTimeout(r, secs * 1000));
 
+      // Αν στο μεταξύ πατήθηκε stop ή ξεκίνησε άλλη κίνηση, δεν πειράζουμε τίποτα.
+      if (token !== this._moveToken) return;
+      this._stopHeartbeat();
       await this._write("S");
-      this._driveCmd = "S";
-      if (wasMoving) this._startHeartbeat();
     }
+
+    // «κινήσου»: μπροστά / πίσω (παλιά έργα με αριστερά/δεξιά εδώ δουλεύουν ακόμα)
+    move(args)    { return this._drive(this._dirCode(args.DIR, "U")); }
+    moveFor(args) { return this._driveFor(this._dirCode(args.DIR, "U"), args.SECS); }
+
+    // «στρίψε»: αριστερά / δεξιά (επιτόπια)
+    turn(args)    { return this._drive(this._dirCode(args.DIR, "L")); }
+    turnFor(args) { return this._driveFor(this._dirCode(args.DIR, "L"), args.SECS); }
 
     async stop() {
       if (!this._requireConnected()) return;
@@ -434,6 +537,7 @@
         this._lineFollow = false;
         await this._write("z");
       }
+      this._moveToken++;
       this._stopHeartbeat();
       await this._write("S");
     }
@@ -470,6 +574,7 @@
       const on = String(args.STATE || "ON").toUpperCase() === "ON";
       if (on) {
         this._lineFollow = true;
+        this._moveToken++;
         this._stopHeartbeat();
         await this._write("Z");
       } else {
