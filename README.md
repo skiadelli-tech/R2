@@ -92,4 +92,4 @@
 
 ## Άδεια
 
-© 2026 Maria Skiadelli. Creative Commons [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/deed.el): ελεύθερη χρήση, διανομή και τροποποίηση για μη εμπορικούς σκοπούς, με αναφορά της δημιουργού.
+© 2026 Maria Skiadelli. Creative Commons [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/deed.el): ελεύθερη χρήση, διανομή και τροποποίηση για μη εμπορικούς σκοπούς, με αναφορά της δημιουργού. Οι τροποποιημένες εκδοχές διανέμονται με την ίδια άδεια.
