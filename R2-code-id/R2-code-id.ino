@@ -7,10 +7,38 @@
 //   Sound:    B = horn (non-blocking)
 //   Rear LED: t = ON, u = OFF
 //   Front RGB: f = ON, g = OFF, Cx = set color (x: W R G B A P C)
-//   Sensors:  S: sound level, D: distance, L: lux
+//   Line follow: Z = ON, z = OFF
+//   Sensors (ερώτηση -> απάντηση):
+//     ?      -> "D:<cm>"      απόσταση
+//     Y / !  -> "T:<0/1>"     αφή
+//     H / #  -> "L:<lux>"     φως
+//     J / $  -> "S:<level>"   ήχος
+//     M      -> "N:<0/1>"     γραμμή
+//     I      -> "I:<id>"      ταυτότητα (τελευταία ψηφία διεύθυνσης Bluetooth)
 
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
+#include <EEPROM.h>
+
+void setFrontMode(uint8_t m);   // δήλωση (χρησιμοποιείται πριν οριστεί)
+
+// ===== ΤΑΥΤΟΤΗΤΑ ΡΟΜΠΟΤ =====
+// Κατά την εκκίνηση το ρομπότ ρωτά το BT24 τη διεύθυνσή του (AT+LADDR)
+// και κρατά τα 2 τελευταία ψηφία (π.χ. "DE"). Ίδιος κώδικας για όλα τα ρομπότ.
+// Αν το module δεν απαντήσει, χρησιμοποιείται το ROBOT_ID_FALLBACK
+// (αφήστε το κενό "" για να δείχνει η σελίδα το όνομα Bluetooth).
+static const char ROBOT_ID_FALLBACK[] = "??";   // "??" = το BT24 δεν έδωσε διεύθυνση
+static const uint8_t ID_DIGITS = 2;   // πόσα τελευταία ψηφία να δείχνει (2 ή 4)
+static char robotId[13] = "";
+
+// ===== ΑΥΤΟΜΑΤΗ ΜΕΤΟΝΟΜΑΣΙΑ BLUETOOTH =====
+// Την πρώτη φορά που το ρομπότ διαβάσει τη διεύθυνσή του, δίνει στο BT24 το
+// όνομα NAME_PREFIX + ταυτότητα (π.χ. "R2-A6"), ώστε να φαίνεται έτσι και στο
+// παράθυρο επιλογής συσκευής. Γίνεται μία φορά ανά module (ακούγονται 2 μπιπ).
+// Βάλτε false αν θέλετε να κρατήσετε τα ονόματα που έχουν ήδη τα modules.
+static const bool AUTO_RENAME   = true;
+static const char NAME_PREFIX[] = "R2-";   // έως 6 χαρακτήρες, χωρίς κενά
+// ============================
 
 // Motor pins
 static const uint8_t DIR_L  = 4;
@@ -68,16 +96,12 @@ static const uint8_t SOUND_PIN = A6; // A6 sound sensor (analog-only)
 
 
 static bool lineFollowEnabled = false;
-static bool lineSensorActivated = false;
 
 enum LineAction : uint8_t { LA_NONE, LA_LEFT_PULSE, LA_RIGHT_PULSE };
 static LineAction lineAction = LA_NONE;
 static unsigned long lineActionUntilMs = 0;
 static const uint16_t LINE_PULSE_MS = 50;
 
-// Sensor states (kept compatible with other app naming)
-static bool robotActive = true;
-static bool sensorActivated = false;
 
 static bool touchPressed = false;
 static float lastLux = 0.0f;
@@ -95,9 +119,6 @@ static const uint8_t US_NOECHO_TO_FAR_AFTER = 3;   // consecutive failures
 static const float   US_FAR_CM = 400.0f;           // HC-SR04 nominal max range
 
 
-// Thresholds (adjust to taste)
-static const float LUX_THRESHOLD   = 250.0f;
-static const float SOUND_THRESHOLD = 15.0f;
 
 // Polling (avoid expensive pow() too often)
 static unsigned long lastSensorPollMs = 0;
@@ -167,21 +188,6 @@ void turnRight(uint8_t sp) {
 }
 
 // ---- Buzzer ----
-void horn() {
-  // 1ο μπιπ
-  tone(BUZZER_PIN, 880);   // A5
-  delay(160);
-  noTone(BUZZER_PIN);
-  delay(80);
-
-  // 2ο μπιπ (λίγο πιο ψηλά, δίνει “κόρνα” αίσθηση)
-  tone(BUZZER_PIN, 988);   // B5
-  delay(180);
-  noTone(BUZZER_PIN);
-}
-
-
-
 // Non-blocking horn (allows immediate stop when touch is released / Scratch stops).
 static bool hornActive = false;
 static uint8_t hornPhase = 0;
@@ -269,32 +275,38 @@ void showParking() {
 }
 
 // ---- Line follow (3-sensor) ----
+// Τα φώτα αλλάζουν ΜΟΝΟ όταν αλλάζει η κατάσταση. Πριν, ξαναρυθμίζονταν σε
+// κάθε επανάληψη του loop, οπότε το πορτοκαλί φλας δεν αναβόσβηνε ποτέ.
 static inline void lfApplyForward() {
   driveForward(SPEED_FWD, SPEED_FWD);
-  setFrontMode(FWD);
-  frontShow(rgb(0, 180, 0)); // green
+  if (frontMode != FWD) {
+    setFrontMode(FWD);
+    frontShow(rgb(0, 180, 0)); // green
+  }
 }
 
 static inline void lfApplyLeft() {
   turnLeft(SPEED_TURN);
-  setFrontMode(LEFT_BLINK);
-  frontShow(rgb(200, 120, 0)); // amber
-  blinkOn = true;
-  lastBlinkMs = millis();
+  if (frontMode != LEFT_BLINK) {
+    setFrontMode(LEFT_BLINK);
+    frontShow(rgb(200, 120, 0)); // amber
+  }
 }
 
 static inline void lfApplyRight() {
   turnRight(SPEED_TURN);
-  setFrontMode(RIGHT_BLINK);
-  frontShow(rgb(200, 120, 0)); // amber
-  blinkOn = true;
-  lastBlinkMs = millis();
+  if (frontMode != RIGHT_BLINK) {
+    setFrontMode(RIGHT_BLINK);
+    frontShow(rgb(200, 120, 0)); // amber
+  }
 }
 
 static inline void lfApplyStop() {
   motorsStop();
-  setFrontMode(PARK);
-  showParking();
+  if (frontMode != PARK) {
+    setFrontMode(PARK);
+    showParking();
+  }
 }
 
 void serviceLineFollow() {
@@ -320,14 +332,12 @@ void serviceLineFollow() {
 
   if (C) {
     // On line: go forward (matches your original logic).
-    lineSensorActivated = true;
     lfApplyForward();
     return;
   }
 
   // Off center: try to re-acquire using left/right sensors with short pulses.
   if (L && !R) {
-    lineSensorActivated = true;
     lfApplyLeft();
     lineAction = LA_LEFT_PULSE;
     lineActionUntilMs = now + LINE_PULSE_MS;
@@ -336,7 +346,6 @@ void serviceLineFollow() {
   }
 
   if (R && !L) {
-    lineSensorActivated = true;
     lfApplyRight();
     lineAction = LA_RIGHT_PULSE;
     lineActionUntilMs = now + LINE_PULSE_MS;
@@ -346,7 +355,6 @@ void serviceLineFollow() {
 
   // No clear reading: stop.
   lfApplyStop();
-  lineSensorActivated = false;
 }
 
 void setFrontMode(uint8_t m) {
@@ -421,7 +429,10 @@ uint32_t colorFromCode(char x) {
 // ---- Ultrasonic (cm) ----
 // Low-level ping using the currently selected pins.
 // Returns distance in cm, or -1 if no echo (timeout).
-static float ultrasonicPingCm(uint8_t trigPin, uint8_t echoPin) {
+// retry=true μόνο στην εκκίνηση. Στη συνεχή μέτρηση ΔΕΝ ξαναδοκιμάζουμε:
+// όταν δεν υπάρχει εμπόδιο, κάθε pulseIn "παγώνει" το loop ~25ms, και με
+// τη δεύτερη προσπάθεια γινόταν ~50ms κάθε 120ms (εντολές/φώτα καθυστερούσαν).
+static float ultrasonicPingCm(uint8_t trigPin, uint8_t echoPin, bool retry = false) {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
   digitalWrite(trigPin, HIGH);
@@ -429,7 +440,7 @@ static float ultrasonicPingCm(uint8_t trigPin, uint8_t echoPin) {
   digitalWrite(trigPin, LOW);
 
   unsigned long us = pulseIn(echoPin, HIGH, 25000UL); // ~4m max
-  if (us == 0) {
+  if (us == 0 && retry) {
     // quick retry (occasionally the first trigger misses)
     us = pulseIn(echoPin, HIGH, 25000UL);
   }
@@ -449,7 +460,7 @@ static bool ultrasonicTryMapping(uint8_t trigPin, uint8_t echoPin) {
   ultrasonicSelectPins(trigPin, echoPin);
   // Try a few pings with safe spacing. Accept a plausible reading.
   for (uint8_t i = 0; i < 3; i++) {
-    float cm = ultrasonicPingCm(trigPin, echoPin);
+    float cm = ultrasonicPingCm(trigPin, echoPin, true);
     if (cm >= 2.0f && cm <= 400.0f) {
       lastDistanceCm = cm;
       lastDistanceMs = millis();
@@ -544,15 +555,192 @@ void pollSensors() {
   if (now - lastSensorPollMs < SENSOR_POLL_MS) return;
   lastSensorPollMs = now;
 
-  touchPressed = readTouchPressed();
+  // Ο ήχος χρειάζεται συχνή δειγματοληψία για να δουλεύει το envelope.
+  // Αφή και φως διαβάζονται μόνο όταν ζητηθούν (Y / H): το readLux() με pow()
+  // είναι βαρύ και τρεχε 100 φορές το δευτερόλεπτο χωρίς να χρησιμοποιείται.
   lastSoundLevel = readSoundLevel();
-  lastLux = readLux();
+}
 
-  bool soundTrig = (lastSoundLevel > SOUND_THRESHOLD);
-  bool ldrTrig   = (lastLux > LUX_THRESHOLD);
+// ---- Διεύθυνση Bluetooth (μόνο στην εκκίνηση, πριν συνδεθεί κάποιος) ----
+static char btRawReply[13] = "";   // διάγνωση: η πρώτη απάντηση του BT24
 
-  sensorActivated = touchPressed || soundTrig || ldrTrig;
-  if (sensorActivated) robotActive = true;
+static bool isHex(char c) {
+  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+}
+
+// Στέλνει μια εντολή AT και επιστρέφει true αν βρέθηκε διεύθυνση (12 hex ψηφία)
+static bool queryBtAddress(const char *cmd, bool crlf) {
+  while (Serial.available()) Serial.read();
+  Serial.print(cmd);
+  if (crlf) Serial.print("\r\n");
+  Serial.flush();
+
+  char reply[48];
+  uint8_t n = 0;
+  unsigned long t0 = millis();
+  while (millis() - t0 < 350) {
+    while (Serial.available()) {
+      char c = (char)Serial.read();
+      if (n < sizeof(reply) - 1) reply[n++] = c;
+      t0 = millis();
+    }
+  }
+  reply[n] = 0;
+
+  // Για διάγνωση: κρατάμε την πρώτη απάντηση που ήρθε (ό,τι κι αν είναι)
+  if (n > 0 && !btRawReply[0]) {
+    // (αν είναι απλώς η ηχώ της δικής μας ερώτησης, σημειώνεται με '~' μπροστά)
+    bool echo = (strncmp(reply, cmd, strlen(cmd)) == 0);
+    uint8_t k = 0;
+    if (echo) btRawReply[k++] = '~';
+    for (uint8_t i = 0; i < n && k < sizeof(btRawReply) - 1; i++) {
+      char c = reply[i];
+      if (c == '\r' || c == '\n') c = '|';
+      else if (c < 32 || c > 126) c = '.';
+      btRawReply[k++] = c;
+    }
+    btRawReply[k] = 0;
+  }
+
+  // Ψάχνουμε 12 συνεχόμενα hex ψηφία (επιτρέπονται ':' '-' ανάμεσα)
+  char hex[13];
+  uint8_t h = 0;
+  for (char *p = reply; *p && h < 12; p++) {
+    if (isHex(*p)) hex[h++] = (char)toupper(*p);
+    else if (*p == ':' || *p == '-') continue;
+    else h = 0;   // άλλος χαρακτήρας: ξεκινάμε από την αρχή
+  }
+  hex[h] = 0;
+  if (h != 12) return false;
+
+  uint8_t d = (ID_DIGITS >= 1 && ID_DIGITS <= 12) ? ID_DIGITS : 2;
+  strncpy(robotId, hex + 12 - d, d);
+  robotId[d] = 0;
+  return true;
+}
+
+// Η ταυτότητα αποθηκεύεται και στη μόνιμη μνήμη (EEPROM). Έτσι εμφανίζεται
+// ακόμα κι αν κάποια φορά το BT24 δεν απαντήσει στην εκκίνηση (π.χ. επειδή
+// το ρομπότ έκανε επανεκκίνηση ενώ ήταν ήδη συνδεδεμένο).
+static const int     ID_EE_ADDR  = 0;
+static const uint8_t ID_EE_MAGIC = 0xB7;
+static bool idFromModule = false;   // true = διαβάστηκε από το BT24 σε αυτή την εκκίνηση
+static bool anyCmdSeen   = false;   // true = έχει έρθει έστω μία εντολή (κάποιος συνδέθηκε)
+
+static void saveRobotId() {
+  EEPROM.update(ID_EE_ADDR, ID_EE_MAGIC);
+  for (uint8_t i = 0; i < sizeof(robotId); i++) EEPROM.update(ID_EE_ADDR + 1 + i, robotId[i]);
+}
+
+static bool loadRobotId() {
+  if (EEPROM.read(ID_EE_ADDR) != ID_EE_MAGIC) return false;
+  char tmp[sizeof(robotId)];
+  for (uint8_t i = 0; i < sizeof(tmp); i++) tmp[i] = (char)EEPROM.read(ID_EE_ADDR + 1 + i);
+  tmp[sizeof(tmp) - 1] = 0;
+  uint8_t len = strlen(tmp);
+  if (len != ID_DIGITS) return false;
+  for (uint8_t i = 0; i < len; i++) if (!isHex(tmp[i])) return false;
+  strcpy(robotId, tmp);
+  return true;
+}
+
+// ---- Αυτόματη μετονομασία του BT24 ----
+static const int     RN_EE_ADDR  = 20;     // [magic][κατάσταση][ταυτότητα...]
+static const uint8_t RN_EE_MAGIC = 0xC3;
+static const uint8_t RN_DONE     = 0xFF;   // κατάσταση: ολοκληρώθηκε
+static const uint8_t RN_MAX_TRIES = 3;
+
+// Στέλνει "cmd+arg\r\n" στο BT24 και μαζεύει την απάντηση στο out
+static void btCmd(const char *cmd, const char *arg, char *out, uint8_t outSize, uint16_t waitMs) {
+  while (Serial.available()) Serial.read();
+  Serial.print(cmd);
+  if (arg) Serial.print(arg);
+  Serial.print("\r\n");
+  Serial.flush();
+  uint8_t n = 0;
+  unsigned long t0 = millis();
+  while (millis() - t0 < waitMs) {
+    while (Serial.available()) {
+      char c = (char)Serial.read();
+      if (n < outSize - 1) out[n++] = c;
+      t0 = millis();
+    }
+  }
+  out[n] = 0;
+}
+
+static void autoRenameBt() {
+  if (!AUTO_RENAME || !idFromModule) return;
+
+  // Τι έχουμε ήδη κάνει για αυτό το module;
+  uint8_t tries = 0;
+  if (EEPROM.read(RN_EE_ADDR) == RN_EE_MAGIC) {
+    char doneId[sizeof(robotId)];
+    for (uint8_t i = 0; i < sizeof(doneId); i++) doneId[i] = (char)EEPROM.read(RN_EE_ADDR + 2 + i);
+    doneId[sizeof(doneId) - 1] = 0;
+    if (strcmp(doneId, robotId) == 0) {
+      uint8_t st = EEPROM.read(RN_EE_ADDR + 1);
+      if (st == RN_DONE || st >= RN_MAX_TRIES) return;   // έγινε ήδη (ή δοκιμάστηκε αρκετά)
+      tries = st;
+    }
+  }
+
+  char want[8 + sizeof(robotId)];
+  strncpy(want, NAME_PREFIX, 6);
+  want[6] = 0;
+  strcat(want, robotId);
+
+  // Ίδια μορφή με το sketch του Β. Μίχα: AT+NAME<όνομα> και μετά AT+RESET
+  char r[40];
+  btCmd("AT+NAME", want, r, sizeof(r), 600);
+  // Επιτυχία = το BT24 απάντησε OK ή +NAME=... (η απλή ηχώ της εντολής δεν μετρά)
+  bool ok = (strstr(r, "OK") != NULL) || (strstr(r, "+NAME=") != NULL) || (strstr(r, "+NAME:") != NULL);
+  btCmd("AT+RESET", NULL, r, sizeof(r), 400);
+  delay(1500);   // το module ξαναξεκινά με το νέο όνομα
+
+  EEPROM.update(RN_EE_ADDR, RN_EE_MAGIC);
+  EEPROM.update(RN_EE_ADDR + 1, ok ? RN_DONE : (uint8_t)(tries + 1));
+  for (uint8_t i = 0; i < sizeof(robotId); i++) EEPROM.update(RN_EE_ADDR + 2 + i, robotId[i]);
+
+  if (ok) {   // 2 μπιπ = το όνομα άλλαξε
+    tone(BUZZER_PIN, 440); delay(200); noTone(BUZZER_PIN); delay(60);
+    tone(BUZZER_PIN, 880); delay(200); noTone(BUZZER_PIN);
+  }
+}
+
+static const char *const BT_ADDR_CMDS[] = { "AT+LADDR", "AT+ADDR?", "AT+ADDR", "AT+MAC?", "AT+MAC" };
+static const uint8_t BT_ADDR_CMD_COUNT = sizeof(BT_ADDR_CMDS) / sizeof(BT_ADDR_CMDS[0]);
+
+static void readRobotId() {
+  delay(1500);   // χρόνος για να ξεκινήσει το BT24
+  for (uint8_t attempt = 0; attempt < 2 && !idFromModule; attempt++) {
+    for (uint8_t i = 0; i < BT_ADDR_CMD_COUNT && !idFromModule; i++) {
+      if (queryBtAddress(BT_ADDR_CMDS[i], true) || queryBtAddress(BT_ADDR_CMDS[i], false)) idFromModule = true;
+    }
+    if (!idFromModule) delay(500);
+  }
+  if (idFromModule) { saveRobotId(); autoRenameBt(); return; }
+
+  // Το BT24 δεν απάντησε: χρησιμοποιούμε την αποθηκευμένη ταυτότητα, αν υπάρχει
+  if (loadRobotId()) return;
+  // Άγνωστη ταυτότητα: δείχνουμε "??" (ό,τι ακατέργαστο ήρθε από το BT24
+  // μένει διαθέσιμο για διάγνωση με την εντολή 'i' -> "X:<κείμενο>")
+  strncpy(robotId, ROBOT_ID_FALLBACK, sizeof(robotId) - 1);
+}
+
+// Αν η ταυτότητα δεν διαβάστηκε στην εκκίνηση (π.χ. το Bluetooth μπήκε στη θέση
+// του ΑΦΟΥ άναψε το ρομπότ), ξαναδοκιμάζουμε κάθε 3 δευτ. Μόνο όσο δεν έχει
+// έρθει καμία εντολή, δηλαδή πριν συνδεθεί κάποιος.
+static void retryRobotIdService() {
+  static unsigned long lastTryMs = 0;
+  static uint8_t variant = 0;
+  if (idFromModule || anyCmdSeen) return;
+  if (millis() - lastTryMs < 3000) return;
+  if (Serial.available()) return;
+  bool ok = queryBtAddress(BT_ADDR_CMDS[(variant / 2) % BT_ADDR_CMD_COUNT], (variant % 2) == 0);
+  variant++;
+  lastTryMs = millis();
+  if (ok) { idFromModule = true; saveRobotId(); autoRenameBt(); }
 }
 
 // ---- Setup ----
@@ -588,6 +776,7 @@ void setup() {
   motorsStop();
 
   Serial.begin(9600);
+  readRobotId();   // διαβάζει τα τελευταία ψηφία της διεύθυνσης Bluetooth
   lastCmdMs = millis();
 
   parkingColor = rgb(120,120,120); // default
@@ -597,6 +786,7 @@ void setup() {
 
 // ---- Command handling ----
 void handleCommand(char c) {
+  anyCmdSeen = true;
   lastCmdMs = millis();
   failsafeActive = false;
 
@@ -607,19 +797,13 @@ void handleCommand(char c) {
     lineActionUntilMs = 0;
     buzzerUntilMs = 0;
     noTone(BUZZER_PIN);
+    // Σβήνει το φλας της παρακολούθησης γραμμής (αλλιώς συνέχιζε να
+    // αναβοσβήνει όσο οδηγούσαμε χειροκίνητα)
+    setFrontMode(PARK);
+    showParking();
   }
 
-  // keep case for 'C' color commands; allow lower-case for others
-  if (c >= 'a' && c <= 'z') {
-    // keep 't','u','f','g' as-is
-  }
-
-  // Movement commands MUST be uppercase to avoid clashing with rear off 'u'
-  // (Scratch extension will send uppercase for movement)
-  if (c >= 'a' && c <= 'z') {
-    // do not auto-uppercase (we use lowercase for lights)
-  }
-
+  // Σημ.: οι εντολές κίνησης είναι ΚΕΦΑΛΑΙΑ, τα φώτα πεζά ('u' = πίσω LED OFF)
   switch (c) {
     // ---- Movement (UPPERCASE) ----
     case 'U':
@@ -768,6 +952,19 @@ case 'M': { // line detected? (any of A3/A2/A1)
   break;
 }
 
+    // ---- Ταυτότητα ρομπότ ----
+    case 'I':
+      if (robotId[0]) {
+        Serial.print("I:");
+        Serial.println(robotId);
+      }
+      break;
+
+    case 'i':   // διάγνωση: τι απάντησε το BT24 στην εκκίνηση
+      Serial.print("X:");
+      Serial.println(btRawReply[0] ? btRawReply : "-");
+      break;
+
     // ---- Ultrasonic ----
     case '?': {
       float cm = getDistanceCmCached();
@@ -783,6 +980,8 @@ case 'M': { // line detected? (any of A3/A2/A1)
 
 // ---- Loop ----
 void loop() {
+  retryRobotIdService();
+
   while (Serial.available() > 0) {
     handleCommand((char)Serial.read());
   }

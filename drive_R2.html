@@ -34,11 +34,29 @@
     padding: 0 5px;
   }
 
+  .statusBox {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
   .status { 
     font-weight: 900; 
     font-size: 20px;
     text-shadow: 0 2px 4px rgba(0,0,0,0.4);
   }
+
+  /* Όνομα Bluetooth του ρομπότ */
+  .deviceName {
+    display: none;
+    font-weight: 800;
+    font-size: 15px;
+    background: rgba(0,0,0,0.25);
+    padding: 4px 10px;
+    border-radius: 10px;
+    letter-spacing: 0.5px;
+  }
+  .deviceName.show { display: inline-block; }
 
   /* Γενικό στυλ κουμπιών για μέγιστο contrast */
   button {
@@ -174,7 +192,10 @@
 <body>
 <div class="app">
   <div class="topbar">
-    <div class="status" id="status">Αποσύνδεση</div>
+    <div class="statusBox">
+      <div class="status" id="status">Αποσύνδεση</div>
+      <div class="deviceName" id="deviceName"></div>
+    </div>
     <button class="connect" id="connect">Σύνδεση</button>
   </div>
 
@@ -232,6 +253,7 @@ let repeatTimer = null;
 const pad = document.getElementById("pad");
 const lights = document.getElementById("lights");
 const statusEl = document.getElementById("status");
+const deviceNameEl = document.getElementById("deviceName");
 const connectBtn = document.getElementById("connect");
 
 function setUIConnected(isConnected){
@@ -239,6 +261,40 @@ function setUIConnected(isConnected){
   lights.classList.toggle("disabled", !isConnected);
   statusEl.textContent = isConnected ? "Συνδεδεμένο" : "Αποσύνδεση";
   connectBtn.textContent = isConnected ? "Αποσύνδεση" : "Σύνδεση";
+
+  // Εμφάνιση του ονόματος / ταυτότητας του ρομπότ
+  if (isConnected && device) {
+    showRobotLabel();
+    deviceNameEl.classList.add("show");
+  } else {
+    robotId = "";
+    deviceNameEl.textContent = "";
+    deviceNameEl.classList.remove("show");
+  }
+}
+
+// Ταυτότητα που στέλνει το ίδιο το ρομπότ (εντολή "I" -> "I:DE")
+let robotId = "";
+let rxBuffer = "";
+
+function showRobotLabel(){
+  deviceNameEl.textContent = robotId
+    ? "🤖 " + robotId
+    : "🤖 " + (device?.name || "Χωρίς όνομα");
+}
+
+function onRobotData(event){
+  rxBuffer += new TextDecoder().decode(event.target.value);
+  let nl;
+  while ((nl = rxBuffer.indexOf("\n")) >= 0) {
+    const line = rxBuffer.slice(0, nl).trim();
+    rxBuffer = rxBuffer.slice(nl + 1);
+    if (line.startsWith("I:")) {
+      robotId = line.slice(2).trim();
+      showRobotLabel();
+    }
+  }
+  if (rxBuffer.length > 200) rxBuffer = "";
 }
 
 function onDisconnected(){
@@ -261,8 +317,16 @@ async function connectBLE(){
     const service = await server.getPrimaryService(SERVICE_UUID);
     chr = await service.getCharacteristic(CHAR_UUID);
 
+    // Ακούμε τις απαντήσεις του ρομπότ
+    try {
+      await chr.startNotifications();
+      chr.addEventListener("characteristicvaluechanged", onRobotData);
+    } catch(e) { console.log("notifications:", e); }
+
     setUIConnected(true);
     send("S");
+    setTimeout(()=>send("I"), 300);   // ζητάμε την ταυτότητα
+    setTimeout(()=>{ if (!robotId) send("I"); }, 1200);
   } catch(e) {
     console.log(e);
     if (!chr) setUIConnected(false);
