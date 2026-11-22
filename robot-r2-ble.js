@@ -1,4 +1,4 @@
-/* Robot R2 TurboWarp/Scratch Extension — v18 (ξεχωριστά μπλοκ «στρίψε», ένδειξη ρομπότ στην παλέτα)
+/* Robot R2 TurboWarp/Scratch Extension — v19 (v18 + ονόματα φώτων: «LED (D9)» και «RGB LED (D12)»)
 
    Problem solved:
    - Scratch monitors evaluate reporter/boolean blocks many times per second.
@@ -15,8 +15,8 @@
      Movement (continuous heartbeat): U D L R Q E
      Stop: S
      Horn: B
-     Rear LED: t (ON), u (OFF)
-     Front RGB power: f (ON), g (OFF)
+     LED (D9): t (ON), u (OFF)
+     RGB LED (D12) power: f (ON), g (OFF)
      Parking color: Cx where x in {W,R,G,B,A,P,C}
      Line follow: Z (ON), z (OFF)
      Sensors:
@@ -164,19 +164,19 @@
           {
             opcode: "rearLed",
             blockType: Scratch.BlockType.COMMAND,
-            text: "πίσω LED (D9) [STATE]",
+            text: "LED (D9) [STATE]",
             arguments: { STATE: { type: Scratch.ArgumentType.STRING, menu: "onOffMenu", defaultValue: "ON" } }
           },
           {
             opcode: "frontPower",
             blockType: Scratch.BlockType.COMMAND,
-            text: "μπροστινό RGB (D12) [STATE]",
+            text: "RGB LED (D12) [STATE]",
             arguments: { STATE: { type: Scratch.ArgumentType.STRING, menu: "onOffMenu", defaultValue: "ON" } }
           },
           {
             opcode: "parkingColor",
             blockType: Scratch.BlockType.COMMAND,
-            text: "χρώμα RGB [COL]",
+            text: "χρώμα RGB LED [COL]",
             arguments: { COL: { type: Scratch.ArgumentType.STRING, menu: "colorMenu", defaultValue: "W" } }
           },
 
